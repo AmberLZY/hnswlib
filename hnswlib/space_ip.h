@@ -10,10 +10,15 @@ namespace hnswlib {
 
 static float
 InnerProduct(const void *pVect1, const void *pVect2, const void *qty_ptr) {
-    size_t qty = *((size_t *) qty_ptr);
-    float res = 0;
-    for (unsigned i = 0; i < qty; i++) {
-        res += ((float *) pVect1)[i] * ((float *) pVect2)[i];
+    // Local typed pointers so the compiler can auto-vectorize (ARM fmla / x86 FMA).
+    // Indexing through a void* parameter blocks that. See nmslib/hnswlib#668.
+    const float *vec1 = (const float *) pVect1;
+    const float *vec2 = (const float *) pVect2;
+    const size_t qty = *((const size_t *) qty_ptr);
+
+    float res = 0.0f;
+    for (size_t i = 0; i < qty; i++) {
+        res += vec1[i] * vec2[i];
     }
     return res;
 }
@@ -23,9 +28,10 @@ InnerProductDistance(const void *pVect1, const void *pVect2, const void *qty_ptr
     return 1.0f - InnerProduct(pVect1, pVect2, qty_ptr);
 }
 
-#if defined(USE_AVX)
+#if defined(HNSWLIB_AVX_FUNCS)
 
 // Favor using AVX if available.
+HNSWLIB_TARGET_AVX
 static float
 InnerProductSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -73,6 +79,7 @@ InnerProductSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qt
     return sum;
 }
 
+HNSWLIB_TARGET_AVX
 static float
 InnerProductDistanceSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD4ExtAVX(pVect1v, pVect2v, qty_ptr);
@@ -146,11 +153,11 @@ InnerProductDistanceSIMD4ExtSSE(const void *pVect1v, const void *pVect2v, const 
 #endif
 
 
-#if defined(USE_AVX512)
+#if defined(HNSWLIB_AVX512_FUNCS)
 
+HNSWLIB_TARGET_AVX512
 static float
 InnerProductSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
-    float PORTABLE_ALIGN64 TmpRes[16];
     float *pVect1 = (float *) pVect1v;
     float *pVect2 = (float *) pVect2v;
     size_t qty = *((size_t *) qty_ptr);
@@ -203,6 +210,7 @@ InnerProductSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void
     return sum;
 }
 
+HNSWLIB_TARGET_AVX512
 static float
 InnerProductDistanceSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD16ExtAVX512(pVect1v, pVect2v, qty_ptr);
@@ -210,8 +218,9 @@ InnerProductDistanceSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, co
 
 #endif
 
-#if defined(USE_AVX)
+#if defined(HNSWLIB_AVX_FUNCS)
 
+HNSWLIB_TARGET_AVX
 static float
 InnerProductSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -248,6 +257,7 @@ InnerProductSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *q
     return sum;
 }
 
+HNSWLIB_TARGET_AVX
 static float
 InnerProductDistanceSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD16ExtAVX(pVect1v, pVect2v, qty_ptr);
@@ -458,6 +468,34 @@ InnerProductDistanceSIMD4ExtResidualsNEON(const void *pVect1v, const void *pVect
 }
 #endif
 
+inline void select_ip_kernels() {
+#if defined(USE_SSE)
+    const SimdKind kind = simd_kind();
+#if defined(HNSWLIB_AVX512_FUNCS)
+    if (kind == SIMD_AVX512) {
+        InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX512;
+        InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX512;
+        InnerProductSIMD4Ext = InnerProductSIMD4ExtAVX;
+        InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtAVX;
+        return;
+    }
+#endif
+#if defined(HNSWLIB_AVX_FUNCS)
+    if (kind == SIMD_AVX) {
+        InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
+        InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
+        InnerProductSIMD4Ext = InnerProductSIMD4ExtAVX;
+        InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtAVX;
+        return;
+    }
+#endif
+    InnerProductSIMD16Ext = InnerProductSIMD16ExtSSE;
+    InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtSSE;
+    InnerProductSIMD4Ext = InnerProductSIMD4ExtSSE;
+    InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtSSE;
+#endif
+}
+
 class InnerProductSpace : public SpaceInterface<float> {
     DISTFUNC<float> fstdistfunc_;
     size_t data_size_;
@@ -466,29 +504,7 @@ class InnerProductSpace : public SpaceInterface<float> {
  public:
     InnerProductSpace(size_t dim) {
         fstdistfunc_ = InnerProductDistance;
-#if defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512) || defined(USE_NEON)
-    #if defined(USE_AVX512)
-        if (AVX512Capable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX512;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX512;
-        } else if (AVXCapable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
-        }
-    #elif defined(USE_AVX)
-        if (AVXCapable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
-        }
-    #endif
-    #if defined(USE_AVX)
-        if (AVXCapable()) {
-            InnerProductSIMD4Ext = InnerProductSIMD4ExtAVX;
-            InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtAVX;
-        }
-    #endif
-
-    #if defined(USE_NEON)
+#if defined(USE_NEON)
         if (dim > 0 && dim % 16 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD16ExtNEON;
         else if (dim % 4 == 0)
@@ -497,7 +513,8 @@ class InnerProductSpace : public SpaceInterface<float> {
             fstdistfunc_ = InnerProductDistanceSIMD16ExtResidualsNEON;
         else if (dim > 4)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtResidualsNEON;
-    #else
+#elif defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
+        select_ip_kernels();
         if (dim % 16 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD16Ext;
         else if (dim % 4 == 0)
@@ -506,7 +523,6 @@ class InnerProductSpace : public SpaceInterface<float> {
             fstdistfunc_ = InnerProductDistanceSIMD16ExtResiduals;
         else if (dim > 4)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtResiduals;
-    #endif
 #endif
         dim_ = dim;
         data_size_ = dim * sizeof(float);

@@ -3,6 +3,30 @@ Header-only C++ HNSW implementation with python bindings, insertions and updates
 
 **NEWS:**
 
+**version 0.10.0rc2** (release candidate — not a stable PyPI upload)
+
+* Package version is `0.10.0rc2` (PEP 440); do not upload as final `0.10.0` yet. Supersedes v0.10.0-rc.1.
+* Stream `loadIndexNoExceptions` fails closed on an unopened/failed input without clearing a live index
+* `searchKnnCloserFirst` is `const` again; `addPoint(..., int level)` is restored so integer levels are not treated as `replace_deleted`
+* CMake no longer wipes caller `CMAKE_CXX_FLAGS` (including `add_subdirectory` / examples-off)
+* `StatusOr` stores T inline and moves the result; `*NoExceptions` stream writes return `Status` instead of throwing on write failure
+* Optional no-exceptions C++ API: `*NoExceptions` methods return `Status` / `StatusOr` so the headers can be compiled with `-fno-exceptions` (`-DHNSWLIB_ENABLE_EXCEPTIONS=OFF`). Throwing methods remain the default. (#619, #678) by [@michaelbautin](https://github.com/michaelbautin)
+* Stream `saveIndex` / `loadIndex` over `std::ostream` / `std::istream`, plus `getInternalIdByLabel`
+* CI covers exceptions on/off, Clang / GCC / MSVC, and ASAN / UBSAN
+* Fixed Clang UBSan misaligned label store in addPoint
+* Report addPoint capacity and stream write errors via Status
+* CMake and Python bindings default to C++11 (`HNSWLIB_CXX_STANDARD` / `HNSWLIB_CXX_STD` to request 14/17)
+* Headers are written in the C++11 subset and remain valid when included from a C++17 (or later) translation unit; the CMake INTERFACE target does not export `-std=`
+* Runtime SIMD pick in the header-only spaces (`hnswlib.get_simd()` / `hnswlib::simd_name()` → `sse`/`avx`/`avx512`/`aarch64`). GCC/Clang emit AVX/AVX-512 via target attributes so a portable Python wheel still runs AVX on AVX hosts. Override with `HNSWLIB_SIMD`. Default build no longer passes `-march=native` (`HNSWLIB_NATIVE=1` for a machine-local compile).
+
+**version 0.9.0**
+
+* Fixed incorrect results in bruteforce search with filter (#514) by [@lukaszsmolinski](https://github.com/lukaszsmolinski)
+* Fixed missing normalization check in BFIndex (#514) by [@lukaszsmolinski](https://github.com/lukaszsmolinski)
+* Throw an exception when fewer than k elements are available (#514) by [@lukaszsmolinski](https://github.com/lukaszsmolinski)
+* Remove unused variable (#531) by [@lulyon](https://github.com/lulyon)
+* Change cosine similarity to distance in README by [@yurymalkov](https://github.com/yurymalkov)
+
 **version 0.8.0** 
 
 * Multi-vector document search and epsilon search (for now, only in C++)
@@ -23,7 +47,7 @@ Full list of changes: https://github.com/nmslib/hnswlib/pull/523
 
 
 ### Highlights:
-1) Lightweight, header-only, no dependencies other than C++ 11
+1) Lightweight, header-only, no dependencies other than C++ 11. Headers stay valid in C++17 TUs; this repo’s tests default to C++11 (`HNSWLIB_CXX_STANDARD` / `HNSWLIB_CXX_STD` to request 14/17).
 2) Interfaces for C++, Python, external support for Java and R (https://github.com/jlmelville/rcpphnsw).
 3) Has full support for incremental index construction and updating the elements (thanks to the contribution by Apoorv Sharma). Has support for element deletions 
 (by marking them in index, later can be replaced with other elements). Python index is picklable.
@@ -48,6 +72,7 @@ Note that inner product is not an actual metric. An element can be closer to som
 For other spaces use the nmslib library https://github.com/nmslib/nmslib. 
 
 #### API description
+* `hnswlib.get_simd()` returns the ISA selected at import (`sse`, `avx`, `avx512`, or `aarch64`). Set `HNSWLIB_SIMD` to force a lower-or-equal level (raises if the CPU cannot run it).
 * `hnswlib.Index(space, dim)` creates a non-initialized index an HNSW in space `space` with integer dimension `dim`.
 
 `hnswlib.Index` methods:
@@ -235,6 +260,7 @@ print("Recall for two batches:", np.mean(labels.reshape(-1) == np.arange(len(dat
 #### C++ examples
 [See examples here](examples/cpp/EXAMPLES.md):
 * creating index, inserting elements, searching, serialization/deserialization
+* no-exceptions (`*NoExceptions`) variants of insert / search / I/O for `-fno-exceptions` builds
 * filtering during the search with a boolean function
 * deleting the elements and reusing the memory of the deleted elements for newly added elements
 * multithreaded usage
@@ -256,15 +282,9 @@ or you can install via pip:
 `pip install hnswlib`
 
 
-### For developers 
-Contributions are highly welcome!
+### For developers
 
-Please make pull requests against the `develop` branch.
-
-When making changes please run tests (and please add a test to `tests/python` in case there is new functionality):
-```bash
-python -m unittest discover --start-directory tests/python --pattern "bindings_test*.py"
-```
+Contributions are welcome. Open pull requests against `develop` — workflow, tests, and review checklist are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 
 ### Other implementations

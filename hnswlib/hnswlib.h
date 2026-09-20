@@ -50,9 +50,7 @@ static uint64_t xgetbv(unsigned int index) {
 }
 #endif
 
-#if defined(USE_AVX512)
-#include <immintrin.h>
-#endif
+
 
 #if defined(__GNUC__)
 #define PORTABLE_ALIGN32 __attribute__((aligned(32)))
@@ -64,67 +62,71 @@ static uint64_t xgetbv(unsigned int index) {
 
 // Adapted from https://github.com/Mysticial/FeatureDetector
 #define _XCR_XFEATURE_ENABLED_MASK  0
-
 static bool AVXCapable() {
     int cpuInfo[4];
-
-    // CPU support
     cpuid(cpuInfo, 0, 0);
-    int nIds = cpuInfo[0];
+    if (cpuInfo[0] < 1) return false;
 
-    bool HW_AVX = false;
-    if (nIds >= 0x00000001) {
-        cpuid(cpuInfo, 0x00000001, 0);
-        HW_AVX = (cpuInfo[2] & ((int)1 << 28)) != 0;
-    }
-
-    // OS support
     cpuid(cpuInfo, 1, 0);
-
-    bool osUsesXSAVE_XRSTORE = (cpuInfo[2] & (1 << 27)) != 0;
-    bool cpuAVXSuport = (cpuInfo[2] & (1 << 28)) != 0;
-
-    bool avxSupported = false;
-    if (osUsesXSAVE_XRSTORE && cpuAVXSuport) {
-        uint64_t xcrFeatureMask = xgetbv(_XCR_XFEATURE_ENABLED_MASK);
-        avxSupported = (xcrFeatureMask & 0x6) == 0x6;
-    }
-    return HW_AVX && avxSupported;
+    bool hasAVX = (cpuInfo[2] & (1 << 28)) != 0;
+    bool hasOSXSAVE = (cpuInfo[2] & (1 << 27)) != 0;
+    if (!hasAVX || !hasOSXSAVE) return false;
+  
+    return (xgetbv(_XCR_XFEATURE_ENABLED_MASK) & 0x6) == 0x6;
 }
 
 static bool AVX512Capable() {
     if (!AVXCapable()) return false;
 
     int cpuInfo[4];
-
-    // CPU support
     cpuid(cpuInfo, 0, 0);
-    int nIds = cpuInfo[0];
+    if (cpuInfo[0] < 7) return false;
 
-    bool HW_AVX512F = false;
-    if (nIds >= 0x00000007) {  //  AVX512 Foundation
-        cpuid(cpuInfo, 0x00000007, 0);
-        HW_AVX512F = (cpuInfo[1] & ((int)1 << 16)) != 0;
-    }
+    cpuid(cpuInfo, 7, 0);
+    if ((cpuInfo[1] & (1 << 16)) == 0) return false;
 
-    // OS support
-    cpuid(cpuInfo, 1, 0);
-
-    bool osUsesXSAVE_XRSTORE = (cpuInfo[2] & (1 << 27)) != 0;
-    bool cpuAVXSuport = (cpuInfo[2] & (1 << 28)) != 0;
-
-    bool avx512Supported = false;
-    if (osUsesXSAVE_XRSTORE && cpuAVXSuport) {
-        uint64_t xcrFeatureMask = xgetbv(_XCR_XFEATURE_ENABLED_MASK);
-        avx512Supported = (xcrFeatureMask & 0xe6) == 0xe6;
-    }
-    return HW_AVX512F && avx512Supported;
+    return (xgetbv(_XCR_XFEATURE_ENABLED_MASK) & 0xe6) == 0xe6;
 }
+
+// GCC/Clang: emit AVX / AVX-512 bodies via target attributes even when the TU
+// is compiled at SSE (Python wheels without -march=native). MSVC stays
+// compile-time (#ifdef __AVX__). C++ consumers that pass -mavx* are unchanged
+// (the attribute is a no-op if the TU already has that ISA).
+#if defined(__GNUC__) && !defined(_MSC_VER)
+#define HNSWLIB_HAVE_AVX_TARGET 1
+#define HNSWLIB_HAVE_AVX512_TARGET 1
+#if !defined(USE_AVX)
+#define HNSWLIB_TARGET_AVX __attribute__((target("avx")))
+#else
+#define HNSWLIB_TARGET_AVX
+#endif
+#if !defined(USE_AVX512)
+#define HNSWLIB_TARGET_AVX512 __attribute__((target("avx512f")))
+#else
+#define HNSWLIB_TARGET_AVX512
+#endif
+#else
+#define HNSWLIB_TARGET_AVX
+#define HNSWLIB_TARGET_AVX512
+#endif
+
+#if defined(USE_AVX) || defined(HNSWLIB_HAVE_AVX_TARGET)
+#define HNSWLIB_AVX_FUNCS 1
+#endif
+#if defined(USE_AVX512) || defined(HNSWLIB_HAVE_AVX512_TARGET)
+#define HNSWLIB_AVX512_FUNCS 1
+#endif
+
+#if defined(HNSWLIB_AVX512_FUNCS)
+#include <immintrin.h>
+#endif
 #endif
 
 #include <queue>
 #include <vector>
 #include <iostream>
+#include <ios>
+#include <new>
 #include <utility>
 #include <string.h>
 #include <stdlib.h>
@@ -171,41 +173,195 @@ private:
 
 inline Status OkStatus() { return Status(); }
 
+// Result-or-error container. T is stored inline (no extra heap allocation
+// for the wrapper itself) and is move-constructed from the success path so
+// search / getDataByLabel do not copy the full result. T is not constructed
+// on error paths.
 template <typename T>
 class StatusOr {
 public:
-    // Default constructor
-    StatusOr() : status_(), value_() {}
+    StatusOr() : status_("StatusOr has no value"), has_value_(false) {}
 
-    // Constructor with a value
-    StatusOr(T value) : status_(), value_(value) {}
-
-    // Constructor with an error status
-    StatusOr(const char* error) : status_(error), value_() {}
-    StatusOr(Status status) : status_(status), value_() {}
-
-    // Returns true if the status is OK.
-    bool ok() const { return status_.ok(); }
-
-    // Returns the value if the status is OK, undefined behavior otherwise.
-    T&& value() {
-        return std::move(value_);
+    StatusOr(T value) : status_(), has_value_(false) {
+        new (storage()) T(std::move(value));
+        has_value_ = true;
     }
 
-    const T& value() const {
-        return value_;
+    StatusOr(const char* error)
+        : status_(error ? error : "StatusOr has no value"), has_value_(false) {}
+
+    StatusOr(Status status)
+        : status_(status.ok() ? Status("StatusOr has no value") : status),
+          has_value_(false) {}
+
+    StatusOr(const StatusOr& other)
+        : status_(other.status_), has_value_(false) {
+        if (other.has_value_) {
+            new (storage()) T(*other.storage());
+            has_value_ = true;
+        }
     }
 
-    T operator*() const {
-        return value();
+    StatusOr(StatusOr&& other)
+        : status_(other.status_), has_value_(false) {
+        if (other.has_value_) {
+            new (storage()) T(std::move(*other.storage()));
+            has_value_ = true;
+        }
     }
 
-    Status status() const { return status_; }
+    StatusOr& operator=(const StatusOr& other) {
+        if (this == &other) {
+            return *this;
+        }
+        destroy();
+        status_ = other.status_;
+        if (other.has_value_) {
+            new (storage()) T(*other.storage());
+            has_value_ = true;
+        }
+        return *this;
+    }
+
+    StatusOr& operator=(StatusOr&& other) {
+        if (this == &other) {
+            return *this;
+        }
+        destroy();
+        status_ = other.status_;
+        if (other.has_value_) {
+            new (storage()) T(std::move(*other.storage()));
+            has_value_ = true;
+        }
+        return *this;
+    }
+
+    ~StatusOr() { destroy(); }
+
+    bool ok() const { return status_.ok() && has_value_; }
+
+    T& value() & { return *storage(); }
+    const T& value() const & { return *storage(); }
+    T&& value() && { return std::move(*storage()); }
+
+    const T& operator*() const { return value(); }
+
+    Status status() const {
+        return ok() ? OkStatus() : (status_.ok() ? Status("StatusOr has no value") : status_);
+    }
 
 private:
+    T* storage() { return reinterpret_cast<T*>(storage_); }
+    const T* storage() const { return reinterpret_cast<const T*>(storage_); }
+
+    void destroy() {
+        if (has_value_) {
+            storage()->~T();
+            has_value_ = false;
+        }
+    }
+
     Status status_;
-    T value_;
+    alignas(T) unsigned char storage_[sizeof(T)];
+    bool has_value_;
 };
+
+// Runtime ISA used by L2Space / InnerProductSpace. Default: highest compiled
+// function that the CPU can run. HNSWLIB_SIMD=sse|avx|avx512 forces a
+// lower-or-equal level (throws if the CPU or this build cannot run it).
+enum SimdKind {
+    SIMD_SCALAR = 0,
+    SIMD_SSE = 1,
+    SIMD_AVX = 2,
+    SIMD_AVX512 = 3
+};
+
+inline SimdKind compiled_simd_kind() {
+#if defined(HNSWLIB_AVX512_FUNCS)
+    return SIMD_AVX512;
+#elif defined(HNSWLIB_AVX_FUNCS)
+    return SIMD_AVX;
+#elif defined(USE_SSE)
+    return SIMD_SSE;
+#else
+    return SIMD_SCALAR;
+#endif
+}
+
+inline SimdKind cpu_simd_kind() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return SIMD_SCALAR;
+#elif defined(USE_SSE)
+    const SimdKind compiled = compiled_simd_kind();
+    if (compiled >= SIMD_AVX512 && AVX512Capable()) {
+        return SIMD_AVX512;
+    }
+    if (compiled >= SIMD_AVX && AVXCapable()) {
+        return SIMD_AVX;
+    }
+    return SIMD_SSE;
+#else
+    return SIMD_SCALAR;
+#endif
+}
+
+inline SimdKind parse_simd_env(const char *env, SimdKind have) {
+    if (env == NULL || env[0] == '\0') {
+        return have;
+    }
+#if defined(__aarch64__) || defined(_M_ARM64)
+    if (strcmp(env, "aarch64") == 0) {
+        return SIMD_SCALAR;
+    }
+    HNSWLIB_THROW_RUNTIME_ERROR(
+        strcmp(env, "sse") == 0 || strcmp(env, "avx") == 0 || strcmp(env, "avx512") == 0
+            ? "HNSWLIB_SIMD x86 values are not valid on this architecture"
+            : "HNSWLIB_SIMD must be one of sse|avx|avx512|aarch64");
+    return have;
+#else
+    SimdKind want;
+    if (strcmp(env, "sse") == 0) {
+        want = SIMD_SSE;
+    } else if (strcmp(env, "avx") == 0) {
+        want = SIMD_AVX;
+    } else if (strcmp(env, "avx512") == 0) {
+        want = SIMD_AVX512;
+    } else if (strcmp(env, "aarch64") == 0) {
+        HNSWLIB_THROW_RUNTIME_ERROR("HNSWLIB_SIMD=aarch64 is not valid on this CPU");
+        return have;
+    } else {
+        HNSWLIB_THROW_RUNTIME_ERROR("HNSWLIB_SIMD must be one of sse|avx|avx512|aarch64");
+        return have;
+    }
+    if (want > have) {
+        HNSWLIB_THROW_RUNTIME_ERROR("HNSWLIB_SIMD requests an ISA this CPU cannot run");
+    }
+    return want;
+#endif
+}
+
+inline SimdKind simd_kind() {
+    struct Once {
+        SimdKind value;
+        Once() : value(parse_simd_env(getenv("HNSWLIB_SIMD"), cpu_simd_kind())) {}
+    };
+    static Once once;
+    return once.value;
+}
+
+// "sse" | "avx" | "avx512" | "aarch64" | "scalar"
+inline const char* simd_name() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return "aarch64";
+#else
+    switch (simd_kind()) {
+        case SIMD_AVX512: return "avx512";
+        case SIMD_AVX: return "avx";
+        case SIMD_SSE: return "sse";
+        default: return "scalar";
+    }
+#endif
+}
 
 typedef size_t labeltype;
 
@@ -250,6 +406,41 @@ static void writeBinaryPOD(std::ostream &out, const T &podRef) {
 template<typename T>
 static void readBinaryPOD(std::istream &in, T &podRef) {
     in.read((char *) &podRef, sizeof(T));
+}
+
+// Temporarily disable iostream exceptions so *NoExceptions I/O reports
+// failures via Status instead of throwing std::ios_base::failure.
+class StreamExceptionsOff {
+ public:
+    explicit StreamExceptionsOff(std::ios& stream)
+        : stream_(stream), old_(stream.exceptions()) {
+        stream_.exceptions(std::ios::goodbit);
+    }
+
+    ~StreamExceptionsOff() {
+        // Restoring a mask that includes failbit/badbit throws if those bits
+        // are already set. Only restore when that would be safe.
+        if (!stream_.fail()) {
+            stream_.exceptions(old_);
+        }
+    }
+
+ private:
+    std::ios& stream_;
+    std::ios::iostate old_;
+};
+
+template <typename Fn>
+Status invokeWithoutStreamThrow(Fn&& fn) {
+#if defined(__EXCEPTIONS) || _HAS_EXCEPTIONS == 1
+    try {
+        return fn();
+    } catch (const std::ios_base::failure&) {
+        return Status("Stream I/O failed");
+    }
+#else
+    return fn();
+#endif
 }
 
 template<typename MTYPE>
@@ -299,7 +490,7 @@ class AlgorithmInterface {
         if (!result.ok()) {
             HNSWLIB_THROW_RUNTIME_ERROR(result.status().message());
         }
-        return std::move(result.value());
+        return std::move(result).value();
     }
 
     virtual StatusOr<DistanceLabelPriorityQueue> searchKnnNoExceptions(
@@ -311,13 +502,13 @@ class AlgorithmInterface {
     virtual DistanceLabelVector searchKnnCloserFirst(
             const void* query_data,
             size_t k,
-            BaseFilterFunctor* isIdAllowed = nullptr) {
+            BaseFilterFunctor* isIdAllowed = nullptr) const {
         auto result =
             searchKnnCloserFirstNoExceptions(query_data, k, isIdAllowed);
         if (!result.ok()) {
             HNSWLIB_THROW_RUNTIME_ERROR(result.status().message());
         }
-        return std::move(result.value());
+        return std::move(result).value();
     }
 
     virtual StatusOr<DistanceLabelVector> searchKnnCloserFirstNoExceptions(

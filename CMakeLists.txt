@@ -32,6 +32,7 @@ set(TEST_NAMES
     multiThread_replace_test
     multiThreadLoad_test
     multivector_search_test
+    no_exceptions_api_test
     resize_test
     searchKnnCloserFirst_test
     searchKnnWithFilter_test
@@ -43,6 +44,27 @@ function(add_cxx_flags)
     endforeach()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}" PARENT_SCOPE)
 endfunction()
+
+macro(add_cxx_flag_if_supported flag)
+    unset(TMP_FLAG_SUPPORTED CACHE)
+    check_cxx_compiler_flag("${flag}" TMP_FLAG_SUPPORTED)
+    if(TMP_FLAG_SUPPORTED)
+        add_cxx_flags("${flag}")
+        message(STATUS "Enabled flag: ${flag}")
+    endif()
+endmacro()
+
+macro(add_first_supported_cxx_flag)
+    foreach(candidate_flag IN ITEMS ${ARGN})
+        unset(TMP_FLAG_SUPPORTED CACHE)
+        check_cxx_compiler_flag("${candidate_flag}" TMP_FLAG_SUPPORTED)
+        if(TMP_FLAG_SUPPORTED)
+            add_cxx_flags("${candidate_flag}")
+            message(STATUS "Selected flag: ${candidate_flag}")
+            break()
+        endif()
+    endforeach()
+endmacro()
 
 # Adds an example or test target. The target name parameter is followed by
 # the list of source files. Automatically links with the hnswlib library.
@@ -93,7 +115,16 @@ option(ENABLE_UBSAN "Whether to enable UndefinedBehaviorSanitizer" OFF)
 option(ENABLE_TSAN "Whether to enable ThreadSanitizer" OFF)
 option(ENABLE_MSAN "Whether to enable MemorySanitizer" OFF)
 
-set(CMAKE_CXX_STANDARD 11)
+# C++11 by default. Override: -DHNSWLIB_CXX_STANDARD=17 or HNSWLIB_CXX_STD.
+# Do not put -std=c++11 in CMAKE_CXX_FLAGS (that would cap C++17 consumers).
+if(NOT HNSWLIB_CXX_STANDARD)
+    if(DEFINED ENV{HNSWLIB_CXX_STD})
+        set(HNSWLIB_CXX_STANDARD $ENV{HNSWLIB_CXX_STD})
+    else()
+        set(HNSWLIB_CXX_STANDARD 11)
+    endif()
+endif()
+set(CMAKE_CXX_STANDARD ${HNSWLIB_CXX_STANDARD})
 
 add_library(hnswlib INTERFACE)
 add_library(hnswlib::hnswlib ALIAS hnswlib)
@@ -152,19 +183,21 @@ else()
     set(DISABLE_EXCEPTIONS_FLAGS -fno-exceptions)
 endif()
 
-# Turn on assertions in the RelWithDebInfo build type.
-foreach(NDEBUG_FLAG_STR IN ITEMS "/DNDEBUG" "/D NDEBUG" "-DNDEBUG")
-    string(REPLACE "${NDEBUG_FLAG_STR}" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO
-           "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
-endforeach()
-string(STRIP "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}"
-    CACHE STRING "Flags for RelWithDebInfo configuration." FORCE)
+# RelWithDebInfo assertions apply only when this repo is the top-level
+# project. Forcing the cache from an add_subdirectory() would mutate the
+# parent build.
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    foreach(NDEBUG_FLAG_STR IN ITEMS "/DNDEBUG" "/D NDEBUG" "-DNDEBUG")
+        string(REPLACE "${NDEBUG_FLAG_STR}" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO
+               "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+    endforeach()
+    string(STRIP "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}"
+        CACHE STRING "Flags for RelWithDebInfo configuration." FORCE)
+endif()
 
-# Start with an empty value of CMAKE_CXX_FLAGS, not the value from the cache.
-# It will not override any "default" flags -- those will come from
-# per-build-type variables (CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}).
-set(CMAKE_CXX_FLAGS "")
+# Do not wipe or FORCE-write CMAKE_CXX_FLAGS. That erased caller-supplied
+# flags even when HNSWLIB_EXAMPLES=OFF (add_subdirectory consumers).
 
 if(HNSWLIB_EXAMPLES)
     message("Building examples and tests")
@@ -176,34 +209,29 @@ if(HNSWLIB_EXAMPLES)
         # USE_NEON pulls -march=armv8.2-a+dotprod from the hnswlib INTERFACE;
         # avoid -march=native here so it does not override dotprod.
         if(NOT (USE_NEON AND HNSWLIB_IS_AARCH64))
-            check_cxx_compiler_flag("-march=native" COMPILER_SUPPORT_NATIVE_FLAG)
-            if(COMPILER_SUPPORT_NATIVE_FLAG)
-                add_cxx_flags(-march=native)
-                message("set -march=native flag")
-            else()
-                check_cxx_compiler_flag("-mcpu=apple-m1" COMPILER_SUPPORT_M1_FLAG)
-                if(COMPILER_SUPPORT_M1_FLAG)
-                    add_cxx_flags(-mcpu=apple-m1)
-                    message("set -mcpu=apple-m1 flag")
-                endif()
-            endif()
+            add_first_supported_cxx_flag(-march=native -mcpu=apple-m1)
         endif()
+
+        # Avoiding this compilation error in CI/CD:
+        # invalid feature combination: +avx10.1-256; will be promoted to
+        # avx10.1-512 [-Werror,-Winvalid-feature-combination]
+        add_cxx_flag_if_supported(-Wno-invalid-feature-combination)
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-      # We enable optimizations in all build types, even in Debug.
-      add_cxx_flags(-Ofast -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0)
-      if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc")
-        add_cxx_flags(-mtune=native)
-        message("set -mtune=native flag")
-      elseif(USE_NEON AND HNSWLIB_IS_AARCH64)
-        # -march=armv8.2-a+dotprod comes from hnswlib INTERFACE when USE_NEON is ON.
-        message("Skipping -march=native on AArch64 with USE_NEON (using INTERFACE -march=armv8.2-a+dotprod)")
-      else()
-        add_cxx_flags(-march=native)
-        message("set -march=native flag")
-      endif()
-      if(NOT APPLE)
-        add_cxx_flags(-lrt)
-      endif()
+        # We enable optimizations in all build types, even in Debug.
+        add_cxx_flags(-Ofast -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc")
+            add_cxx_flags(-mtune=native)
+            message("set -mtune=native flag")
+        elseif(USE_NEON AND HNSWLIB_IS_AARCH64)
+            # -march=armv8.2-a+dotprod comes from hnswlib INTERFACE when USE_NEON is ON.
+            message("Skipping -march=native on AArch64 with USE_NEON (using INTERFACE -march=armv8.2-a+dotprod)")
+        else()
+            add_cxx_flags(-march=native)
+            message("set -march=native flag")
+        endif()
+        if(NOT APPLE)
+            add_cxx_flags(-lrt)
+        endif()
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         if (NOT HNSWLIB_ENABLE_EXCEPTIONS)
             # Do not enable exceptions by default. We will enable them on a
@@ -292,7 +320,6 @@ if(HNSWLIB_EXAMPLES)
     endforeach()
 endif()
 
-# Persist CMAKE_CXX_FLAGS in the cache for debuggability.
-string(STRIP "${CMAKE_CXX_FLAGS}" CMAKE_CXX_FLAGS)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}"
-    CACHE STRING "Flags used by the CXX compiler during all build types." FORCE)
+# Do not persist CMAKE_CXX_FLAGS into the CMake cache. A FORCE write from
+# this directory would overwrite the parent project's (or the user's
+# -DCMAKE_CXX_FLAGS=) value, including when examples are disabled.

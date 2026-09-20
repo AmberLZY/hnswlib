@@ -22,9 +22,10 @@ L2Sqr(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return (res);
 }
 
-#if defined(USE_AVX512)
+#if defined(HNSWLIB_AVX512_FUNCS)
 
 // Favor using AVX512 if available.
+HNSWLIB_TARGET_AVX512
 static float
 L2SqrSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float *pVect1 = (float *) pVect1v;
@@ -57,9 +58,10 @@ L2SqrSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_p
 }
 #endif
 
-#if defined(USE_AVX)
+#if defined(HNSWLIB_AVX_FUNCS)
 
 // Favor using AVX if available.
+HNSWLIB_TARGET_AVX
 static float
 L2SqrSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float *pVect1 = (float *) pVect1v;
@@ -324,6 +326,25 @@ L2SqrSIMD4ExtResidualsNEON(const void *pVect1v, const void *pVect2v, const void 
 }
 #endif
 
+inline void select_l2_wide_kernel() {
+#if defined(USE_SSE)
+    const SimdKind kind = simd_kind();
+#if defined(HNSWLIB_AVX512_FUNCS)
+    if (kind == SIMD_AVX512) {
+        L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX512;
+        return;
+    }
+#endif
+#if defined(HNSWLIB_AVX_FUNCS)
+    if (kind == SIMD_AVX) {
+        L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX;
+        return;
+    }
+#endif
+    L2SqrSIMD16Ext = L2SqrSIMD16ExtSSE;
+#endif
+}
+
 class L2Space : public SpaceInterface<float> {
     DISTFUNC<float> fstdistfunc_;
     size_t data_size_;
@@ -332,18 +353,7 @@ class L2Space : public SpaceInterface<float> {
  public:
     L2Space(size_t dim) {
         fstdistfunc_ = L2Sqr;
-#if defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512) || defined(USE_NEON)
-    #if defined(USE_AVX512)
-        if (AVX512Capable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX512;
-        else if (AVXCapable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX;
-    #elif defined(USE_AVX)
-        if (AVXCapable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX;
-    #endif
-
-    #if defined(USE_NEON)
+#if defined(USE_NEON)
         if (dim > 0 && dim % 16 == 0)
             fstdistfunc_ = L2SqrSIMD16ExtNEON;
         else if (dim % 4 == 0)
@@ -352,7 +362,8 @@ class L2Space : public SpaceInterface<float> {
             fstdistfunc_ = L2SqrSIMD16ExtResidualsNEON;
         else if (dim > 4)
             fstdistfunc_ = L2SqrSIMD4ExtResidualsNEON;
-    #else
+#elif defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512)
+        select_l2_wide_kernel();
         if (dim % 16 == 0)
             fstdistfunc_ = L2SqrSIMD16Ext;
         else if (dim % 4 == 0)
@@ -361,7 +372,6 @@ class L2Space : public SpaceInterface<float> {
             fstdistfunc_ = L2SqrSIMD16ExtResiduals;
         else if (dim > 4)
             fstdistfunc_ = L2SqrSIMD4ExtResiduals;
-    #endif
 #endif
         dim_ = dim;
         data_size_ = dim * sizeof(float);

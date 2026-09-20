@@ -25,19 +25,8 @@ class MultiVectorL2Space : public BaseMultiVectorSpace<DOCIDTYPE> {
  public:
     MultiVectorL2Space(size_t dim) {
         fstdistfunc_ = L2Sqr;
-#if defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512)
-    #if defined(USE_AVX512)
-        if (AVX512Capable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX512;
-        else if (AVXCapable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX;
-    #elif defined(USE_AVX)
-        if (AVXCapable())
-            L2SqrSIMD16Ext = L2SqrSIMD16ExtAVX;
-    #endif
-
-    #if defined(USE_NEON)
-        if (dim % 16 == 0)
+#if defined(USE_NEON)
+        if (dim > 0 && dim % 16 == 0)
             fstdistfunc_ = L2SqrSIMD16ExtNEON;
         else if (dim % 4 == 0)
             fstdistfunc_ = L2SqrSIMD4ExtNEON;
@@ -45,7 +34,8 @@ class MultiVectorL2Space : public BaseMultiVectorSpace<DOCIDTYPE> {
             fstdistfunc_ = L2SqrSIMD16ExtResidualsNEON;
         else if (dim > 4)
             fstdistfunc_ = L2SqrSIMD4ExtResidualsNEON;
-    #else
+#elif defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512)
+        select_l2_wide_kernel();
         if (dim % 16 == 0)
             fstdistfunc_ = L2SqrSIMD16Ext;
         else if (dim % 4 == 0)
@@ -54,7 +44,6 @@ class MultiVectorL2Space : public BaseMultiVectorSpace<DOCIDTYPE> {
             fstdistfunc_ = L2SqrSIMD16ExtResiduals;
         else if (dim > 4)
             fstdistfunc_ = L2SqrSIMD4ExtResiduals;
-    #endif
 #endif
         dim_ = dim;
         vector_size_ = dim * sizeof(float);
@@ -95,30 +84,8 @@ class MultiVectorInnerProductSpace : public BaseMultiVectorSpace<DOCIDTYPE> {
  public:
     MultiVectorInnerProductSpace(size_t dim) {
         fstdistfunc_ = InnerProductDistance;
-#if defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
-    #if defined(USE_AVX512)
-        if (AVX512Capable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX512;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX512;
-        } else if (AVXCapable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
-        }
-    #elif defined(USE_AVX)
-        if (AVXCapable()) {
-            InnerProductSIMD16Ext = InnerProductSIMD16ExtAVX;
-            InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtAVX;
-        }
-    #endif
-    #if defined(USE_AVX)
-        if (AVXCapable()) {
-            InnerProductSIMD4Ext = InnerProductSIMD4ExtAVX;
-            InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtAVX;
-        }
-    #endif
-
-    #if defined(USE_NEON)
-        if (dim % 16 == 0)
+#if defined(USE_NEON)
+        if (dim > 0 && dim % 16 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD16ExtNEON;
         else if (dim % 4 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtNEON;
@@ -126,7 +93,8 @@ class MultiVectorInnerProductSpace : public BaseMultiVectorSpace<DOCIDTYPE> {
             fstdistfunc_ = InnerProductDistanceSIMD16ExtResidualsNEON;
         else if (dim > 4)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtResidualsNEON;
-    #else
+#elif defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
+        select_ip_kernels();
         if (dim % 16 == 0)
             fstdistfunc_ = InnerProductDistanceSIMD16Ext;
         else if (dim % 4 == 0)
@@ -135,7 +103,6 @@ class MultiVectorInnerProductSpace : public BaseMultiVectorSpace<DOCIDTYPE> {
             fstdistfunc_ = InnerProductDistanceSIMD16ExtResiduals;
         else if (dim > 4)
             fstdistfunc_ = InnerProductDistanceSIMD4ExtResiduals;
-    #endif
 #endif
         vector_size_ = dim * sizeof(float);
         data_size_ = vector_size_ + sizeof(DOCIDTYPE);

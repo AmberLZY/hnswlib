@@ -64,6 +64,13 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
         free(data_);
     }
 
+    // Labels sit at a packed offset; load via memcpy (nmslib/hnswlib#665).
+    inline labeltype getExternalLabel(size_t internal_id) const {
+        labeltype return_label;
+        memcpy(&return_label, data_ + internal_id * size_per_element_ + data_size_, sizeof(labeltype));
+        return return_label;
+    }
+
 
     Status addPointNoExceptions(const void *datapoint, labeltype label, bool replace_deleted = false) override {
         int idx;
@@ -99,7 +106,7 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
         dict_external_to_internal.erase(found);
 
         size_t cur_c = found->second;
-        labeltype label = *((labeltype*)(data_ + size_per_element_ * (cur_element_count-1) + data_size_));
+        labeltype label = getExternalLabel(cur_element_count - 1);
         dict_external_to_internal[label] = cur_c;
         memcpy(data_ + size_per_element_ * cur_c,
                 data_ + size_per_element_ * (cur_element_count-1),
@@ -117,7 +124,7 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
         for (int i = 0; i < cur_element_count; i++) {
             dist_t dist = fstdistfunc_(query_data, data_ + size_per_element_ * i, dist_func_param_);
             if (dist <= lastdist || topResults.size() < k) {
-                labeltype label = *((labeltype *) (data_ + size_per_element_ * i + data_size_));
+                labeltype label = getExternalLabel(i);
                 if ((!isIdAllowed) || (*isIdAllowed)(label)) {
                     topResults.emplace(dist, label);
                     if (topResults.size() > k)
@@ -132,29 +139,40 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
 
 
     Status saveIndexNoExceptions(std::ostream &output) {
-        writeBinaryPOD(output, maxelements_);
-        writeBinaryPOD(output, size_per_element_);
-        writeBinaryPOD(output, cur_element_count);
+        StreamExceptionsOff guard(output);
+        return invokeWithoutStreamThrow([&]() -> Status {
+            if (!output) {
+                return Status("Cannot save index: output stream is not open or in a failed state");
+            }
+            writeBinaryPOD(output, maxelements_);
+            writeBinaryPOD(output, size_per_element_);
+            writeBinaryPOD(output, cur_element_count);
+            if (!output.good()) {
+              return Status("Failed writing index metadata");
+            }
 
-        output.write(data_, maxelements_ * size_per_element_);
-        return OkStatus();
+            output.write(data_, maxelements_ * size_per_element_);
+            if (!output.good()) {
+              return Status("Failed writing vector data");
+            }
+            return OkStatus();
+        });
     }
 
 
     Status saveIndexNoExceptions(const std::string &location) override {
         std::ofstream output(location, std::ios::binary);
-
-        Status status = saveIndexNoExceptions(output);
-        if (!status.ok()) {
-            HNSWLIB_THROW_RUNTIME_ERROR(status.message());
+        if (!output.is_open()) {
+            return Status("Cannot save index: failed to open output file");
         }
-
-        output.close();
-        return OkStatus();
+        return saveIndexNoExceptions(output);
     }
 
 
     void loadIndex(std::istream &input, SpaceInterface<dist_t> *s) {
+        if (!input) {
+            HNSWLIB_THROW_RUNTIME_ERROR("Cannot load index: input stream is not open or not readable");
+        }
         readBinaryPOD(input, maxelements_);
         readBinaryPOD(input, size_per_element_);
         readBinaryPOD(input, cur_element_count);
